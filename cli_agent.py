@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 class CLIAgent:
     def __init__(self):
-        self.llm = ChatOllama(model=MODEL_NAME, temperature=0)
+        self.llm = ChatOllama(model=MODEL_NAME, temperature=0, num_ctx=16384)
         self.chat = [SystemMessage(content=self.system_prompt())]
 
     def system_prompt(self):
@@ -107,14 +107,40 @@ EXECUTE: ls Daily
                     fetch_url = f"https://zenn.dev/api/articles/{article_id}"
                 
                 html = self.execute(f'curl "{fetch_url}"')
-                prompt = f"""以下の記事を必ず日本語で、Markdownで簡潔に要約してください。
-その際、重要な技術用語、固有名詞、概念（例: Python, 埋め込み, フロントエンドなど）については、後からリンクできるように `[[用語]]` のように2重の角括弧で囲んで出力してください。
+                
+                # 1. <script> と <style> タグを中身ごと完全に削除
+                clean_html = re.sub(r'<script\b[^>]*>([\s\S]*?)</script>', '', html)
+                clean_html = re.sub(r'<style\b[^>]*>([\s\S]*?)</style>', '', clean_html)
+                
+                # 2. 【大幅強化】記事本文が始まりそうなHTML要素の目印で、前方のノイズ（ログイン等）をカット
+                for marker in ['<article', '<main', 'class="article', 'id="main"']:
+                    if marker in clean_html:
+                        clean_html = clean_html.split(marker, 1)[-1]
+                        break
+                
+                # 3. 【最重要】すべてのHTMLタグ（<...>）を完全に消去して「純粋なテキスト」にする
+                plain_text = re.sub(r'<[^>]*>', '', clean_html)
+                
+                # 4. 無駄な連続改行や空白をスッキリまとめる（LLMが読みやすくなる）
+                plain_text = re.sub(r'\n\s*\n', '\n', plain_text).strip()
+                
+                # デバッグ表示用（本当に本文が入っているか確認するため）
+                print("\n" + "="*40)
+                print(f"[DEBUG] 実際にLLMへ渡す純粋な本文テキスト（先頭500文字）:")
+                print(plain_text[:500])
+                print("="*40 + "\n")
+                
+                prompt = f"""以下の記事を日本語で、Markdownで簡潔に要約してください。
 
 URL:{url}
 本文:
-{html[:10000]}"""
-                summary=self.llm.invoke(prompt).content
-                daily_link = Path(note['name']).stem # 例: "2026-06-09"
+{plain_text[:7000]}
+
+【出力時の厳格なルール】
+記事内の重要な技術用語、固有名詞、役割、概念（例: [[プロダクトマネージャー]], [[AI]], [[アジャイル開発]], [[プロセス管理]], [[Product Taste]] など）については、後からリンクできるように、必ず `[[用語]]` のように2重の角括弧で囲んで出力してください。普通のテキストのまま出力せず、積極的にWikiLink化してください。"""
+                
+                summary = self.llm.invoke(prompt).content
+                daily_link = Path(note['name']).stem
                 out.write_text(f"# Literature Note\n\nContext: [[{daily_link}]]\nSource: {url}\n\n{summary}", encoding="utf-8")
                 print("Created:",out)
 
